@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VITO Rewards Cloud
 // @namespace    https://torn.com/vito-family-cloud/
-// @version      3.3.1
+// @version      3.4.0
 // @description  Vito family tiers, rank-valued redeemable points, bazaar sale reconciliation, purchase-triggered inbox, thanked history, chat drafts and manually confirmed payouts.
 // @author       Vito / NASHOR (based on ideas from Torn Bazaar Customer Thanker by KOKOT)
 // @match        https://www.torn.com/*
@@ -423,14 +423,28 @@
       updateStatus('Chat may not have opened, or recipient could not be verified. Message copied: paste it in the correct chat manually.');
     }
   }
-  function compose(id, accountOnly=false) {
+  async function compose(id, accountOnly=false) {
     const c=db.clients[id]; if(!c) return;
     if(isBlacklisted(id) && !accountOnly) return alert('This customer is blacklisted. Unblock them in the Blacklist tab before sending a thank-you.');
     if(!accountOnly && !hasNewPurchase(c)) {
       alert('Already thanked for the recorded purchases. Sync sales after a new purchase to unlock Thank. Use Account Info to reply anytime.');
       return;
     }
-    const body=accountOnly ? accountInfoMessage(id) : sendTemplate(id).body;
+    let body=accountOnly ? accountInfoMessage(id) : sendTemplate(id).body;
+    if(cloudToken && !accountOnly){
+      // Each client receives a stable, server-generated private code, never included in public messages.
+      // If an older hash-only code exists, do not silently rotate or leak another player's code.
+      try{
+        const access=await cloudCall('/api/client-access/for-thank','POST',{tornId:id});
+        body+='\n\n🔐 YOUR PRIVATE CASA VITO ACCESS\n'+
+              'Visit https://vito-rewards-api.thomasmarcheix87.workers.dev/family\n'+
+              'Your personal code: '+access.code+'\n'+
+              'Keep this code private. It lets you see your rank, points and cash prize anytime!';
+      }catch(e){
+        alert('Could not retrieve the private access code for this customer: '+e.message+'\n\nOpen Casa Vito Admin > Customers and issue a new code if this is a legacy account. The thank-you was NOT marked sent.');
+        return;
+      }
+    }
     const popup=document.createElement('div');popup.className='vr-overlay';
     const modeLabel=accountOnly?'Account Info':'Thank';
     popup.innerHTML=`<div class="vr-dialog"><h3>💬 Vito ${modeLabel} — ${escapeHtml(c.name||'#'+id)}</h3><label>Chat message (editable)</label><textarea id="vr-body" rows="14">${escapeHtml(body)}</textarea><p class="vr-muted">${accountOnly?'Account Info is always available and does not acknowledge purchases.':'After actually sending this thank-you, confirm it below. The Thank button unlocks only after a new Bazaar purchase is imported.'} Chat opens in Torn; review and press Send manually.</p><div class="vr-actions"><button id="vr-open">💬 Open chat directly</button><button id="vr-copy">📋 Copy text</button><button id="vr-sent">${accountOnly?'✓ Done':'✓ I sent it'}</button><button id="vr-close">Cancel</button></div></div>`;
