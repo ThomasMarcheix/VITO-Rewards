@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VITO Rewards Cloud
 // @namespace    https://torn.com/vito-family-cloud/
-// @version      3.4.1
+// @version      3.4.2
 // @description  Vito family tiers, rank-valued redeemable points, bazaar sale reconciliation, purchase-triggered inbox, thanked history, chat drafts and manually confirmed payouts.
 // @author       Vito / NASHOR (based on ideas from Torn Bazaar Customer Thanker by KOKOT)
 // @match        https://www.torn.com/*
