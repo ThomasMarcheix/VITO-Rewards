@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VITO Rewards Cloud
 // @namespace    https://torn.com/vito-family-cloud/
-// @version      3.4.4
+// @version      3.4.5
 // @description  Vito family tiers, rank-valued redeemable points, bazaar sale reconciliation, purchase-triggered inbox, thanked history, chat drafts and manually confirmed payouts.
 // @author       Vito / NASHOR (based on ideas from Torn Bazaar Customer Thanker by KOKOT)
 // @match        https://www.torn.com/*
@@ -139,7 +139,7 @@
     for (const sale of sales) {
       const id = sale.buyer;
       const prev = before[id];
-      const c = clients[id] ||= clientTemplate(id, prev?.name||sale.name||'');
+      const c = clients[id] ||= {...clientTemplate(id, prev?.name||sale.name||''),profileImage:prev?.profileImage||''};
       c.spent += sale.amount;
       c.items += sale.qty;
       c.sales++;
@@ -195,51 +195,74 @@
       ontimeout:()=>reject(new Error('API request timed out'))
     }));
   }
-  // Resolve display names separately from the immutable Torn player IDs.
-  // No points/cashback or ledger entries are changed by this routine.
-  let namesBusy = false;
-  const nameAttemptsThisSession = new Set();
-  async function resolveNames() {
-    if(namesBusy || syncBusy) return;
-    const key = GM_getValue(API, '').trim();
-    if(!key) { updateStatus('Add an API key in Settings to look up names.'); return; }
-    const missing = Object.values(db.clients).filter(c => !c.name && !nameAttemptsThisSession.has(c.id));
-    if(!missing.length) {updateStatus('All available customer names have been checked.'); return;}
-    namesBusy = true;
-    let resolved=0, failed=0;
-    try {
-      for(const c of missing) {
-        nameAttemptsThisSession.add(c.id);
-        updateStatus(`Looking up player names: ${resolved+failed+1}/${missing.length}…`);
-        try {
-          // Same official profile lookup used by the original Customer Thanker.
-          const result = await apiGet(`https://api.torn.com/v2/user/${c.id}/profile`, key);
-          const name = result?.profile?.name;
-          if(typeof name === 'string' && name.trim() && name.length <= 80) {
-            // Re-check live record so manual edits are never overwritten.
-            if(db.clients[c.id] && !db.clients[c.id].name) {
-              db.clients[c.id].name = name.trim();
-              resolved++;
-            }
-          } else failed++;
-        } catch(e) {
-          failed++;
-          console.warn('[VITO] Could not resolve player name', c.id, e.message);
-        }
-        // Spread requests out to respect Torn API limits.
-        if(resolved+failed < missing.length) await new Promise(r=>setTimeout(r,1000));
-      }
-      if(cloudReady) for(const c of missing) if(db.clients[c.id]?.name) { try{await cloudCall('/api/name','POST',{tornId:c.id,name:db.clients[c.id].name});}catch(e){console.warn('Cloud name update failed',e);} }
-      if(cloudReady) await cloudRefresh(); else {save();renderAll();}
-      updateStatus(`Names updated: ${resolved} found${failed ? `, ${failed} unavailable` : ''}.`);
-    } finally {namesBusy = false;}
-  }
-  function queueNameLookup() {
-    if(!namesBusy && Object.values(db.clients).some(c=>!c.name&&!nameAttemptsThisSession.has(c.id))) {
-      // Do not interrupt the sales import; start after the current call stack.
-      setTimeout(()=>{if(!syncBusy) resolveNames();},1000);
-    }
-  }
+   // User images are public Torn profile data; only HTTPS URLs from Torn's image CDN
+   // are accepted. No image bytes, credentials or API keys are sent to Cloudflare.
+   const PROFILE_CHECKED_KEY=PREFIX+'profileCheckedV1';
+   const PROFILE_REFRESH_MS=7*24*60*60*1000;
+   let profileChecked=GM_getValue(PROFILE_CHECKED_KEY,{})||{};
+   let profilesBusy=false;
+   const profileAttemptsThisSession=new Set();
+   function validProfileImage(value){
+     if(typeof value!=='string'||value.length>500)return '';
+     try{
+       const u=new URL(value);
+       if(u.protocol!=='https:'||u.username||u.password)return '';
+       // Torn profile images are hosted on Torn-controlled domains.
+       if(!(u.hostname==='torn.com'||u.hostname.endsWith('.torn.com')))return '';
+       return u.href;
+     }catch{return '';}
+   }
+   async function resolveProfiles(force=false){
+     if(profilesBusy||syncBusy)return;
+     const key=GM_getValue(API,'').trim();
+     if(!key){updateStatus('Add a Torn API key in Settings to update profiles.');return;}
+     if(cloudToken&&!cloudReady){updateStatus('Connect to Cloud before updating profiles.');return;}
+     const due=Object.values(db.clients).filter(c=>!profileAttemptsThisSession.has(c.id)&&(
+       !c.name||force||!profileChecked[c.id]||Date.now()-profileChecked[c.id]>PROFILE_REFRESH_MS));
+     if(!due.length){updateStatus('Profiles are up to date (7-day cache).');return;}
+     profilesBusy=true;
+     let found=0,missing=0,failed=0,uploaded=0;
+     try{
+       for(let i=0;i<due.length;i++){
+         const candidate=due[i],id=candidate.id;
+         profileAttemptsThisSession.add(id);
+         updateStatus(`Updating profiles: ${i+1}/${due.length} · ${found} avatars…`);
+         try{
+           const result=await apiGet(`https://api.torn.com/v2/user/${id}/profile`,key);
+           const profile=result?.profile||{};
+           const name=typeof profile.name==='string'&&profile.name.trim()&&profile.name.length<=80?profile.name.trim():'';
+           const image=validProfileImage(profile.profile_image||profile.image||result?.profile_image);
+           const live=db.clients[id];
+           if(live){
+             // Respect existing manually edited names.
+             if(name&&!live.name)live.name=name;
+             if(image)live.profileImage=image;
+           }
+           if(image)found++;else missing++;
+           if(cloudReady&&(image||name)){
+             try{
+               await cloudCall('/api/profile','POST',{tornId:id,name:live?.name||name||'',profileImage:image});
+               uploaded++;
+             }catch(e){console.warn('[VITO] Could not save Cloud profile',id,e.message);failed++;}
+           }
+           profileChecked[id]=Date.now();
+           GM_setValue(PROFILE_CHECKED_KEY,profileChecked);
+         }catch(e){
+           failed++;
+           console.warn('[VITO] Profile lookup failed',id,e.message);
+         }
+         // Stay comfortably under the default Torn API limit.
+         if(i<due.length-1)await new Promise(r=>setTimeout(r,1100));
+       }
+       if(cloudReady)await cloudRefresh();else{save();renderAll();}
+       updateStatus(`Profiles: ${found} avatars found, ${missing} without avatar, ${failed} errors${cloudReady?' · '+uploaded+' uploaded':''}.`);
+     }finally{profilesBusy=false;}
+   }
+   function queueNameLookup(){
+     if(!profilesBusy&&Object.values(db.clients).some(c=>!c.name&&!profileAttemptsThisSession.has(c.id))){
+       setTimeout(()=>{if(!syncBusy)resolveProfiles();},1000);
+     }
+   }
   function saleFromLog(log) {
     if (log?.details?.category !== 'Bazaars' || log?.details?.title !== 'Bazaar sell') return null;
     const buyer = cleanId(log?.data?.buyer);
@@ -606,7 +629,7 @@
       ? 'Customers with purchases not yet acknowledged. After confirming a Thank message, they move to Thanked. A newly imported sale brings them back here.'
       : 'Customers whose latest recorded purchases were thanked. A newly imported purchase moves them back to To Thank automatically.';
     return `<div class="vr-card"><b>${awaiting} to thank · ${thanked} thanked</b> · ${Object.keys(db.blacklist).length} blacklisted · ${Object.keys(db.sales).length} sales<br><span class="vr-small">${intro}</span><br><span class="vr-small">Total outstanding at current ranks: ${$(Math.floor(outstanding/100))} (including reserved requests)</span><br><span class="vr-small">Loyalty start: ${escapeHtml(dateText(db.startedAt*1000))} · Last sync: ${escapeHtml(dateText(db.lastSync))}</span><br><span class="vr-small">Last API scan: ${db.diagnostics.logsRead||0} logs, ${db.diagnostics.bazaarFound||0} Bazaar sales found</span></div>
-       <div><button id="vr-sync">🔄 Sync sales</button><button id="vr-export">⬇ Backup JSON</button><button id="vr-names">👤 Update names</button>${Object.keys(db.clients).length===0?'<button id="vr-history">📜 Import last 7 days</button>':''}</div>
+       <div><button id="vr-sync">🔄 Sync sales</button><button id="vr-export">⬇ Backup JSON</button><button id="vr-names">👤 Update profiles & avatars</button>${Object.keys(db.clients).length===0?'<button id="vr-history">📜 Import last 7 days</button>':''}</div>
        <label>Find customer</label><input id="vr-search" placeholder="Name or Torn ID">
        <div id="vr-list">${clientRows(list)}</div>`;
   }
@@ -615,7 +638,8 @@
     return list.slice(0,250).map(c=>{
       const next=nextTier(c.spent),available=Math.floor(availableCents(c)/100);
       const newSale=hasNewPurchase(c);
-      return `<div class="vr-card"><div class="vr-row"><b>${escapeHtml(c.name||'#'+c.id)}</b><span>${tier(c.spent).label}</span></div>
+      const avatar=validProfileImage(c.profileImage);
+       return `<div class="vr-card"><div class="vr-row"><span style="display:flex;align-items:center;gap:9px">${avatar?`<img src="${escapeHtml(avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer" style="width:38px;height:38px;object-fit:cover;border-radius:50%;background:#111827">`:''}<b>${escapeHtml(c.name||'#'+c.id)}</b></span><span>${tier(c.spent).label}</span></div>
       <div class="vr-small">ID ${c.id} · ${c.sales} sales · ${c.items} items</div>
       <div>Spent: <b>${$(c.spent)}</b> · Points earned: <b>${Math.floor(c.spent/POINT_USD).toLocaleString('en-US')}</b></div>
       <div class="vr-small">Unredeemed points: ${(pointsAvailableMicro(c)/MICRO).toLocaleString('en-US',{maximumFractionDigits:2})} · Value / point: ${$(RATE_PER_POINT_CENTS(c.spent)/100)}</div>
@@ -728,7 +752,7 @@
   function bindPanel() {
     const el=root.querySelector('#vr-content');
     el.querySelectorAll('#vr-sync').forEach(x=>x.onclick=syncSales);
-    const namesBtn=el.querySelector('#vr-names');if(namesBtn)namesBtn.onclick=()=>{nameAttemptsThisSession.clear();resolveNames();};
+    const namesBtn=el.querySelector('#vr-names');if(namesBtn)namesBtn.onclick=()=>{profileAttemptsThisSession.clear();resolveProfiles(true);};
     const historyBtn=el.querySelector('#vr-history');if(historyBtn)historyBtn.onclick=importSevenDays;
     el.querySelectorAll('#vr-export').forEach(x=>x.onclick=exportData);
     const importBtn=el.querySelector('#vr-import');if(importBtn)importBtn.onclick=importData;
