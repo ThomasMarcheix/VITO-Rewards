@@ -423,31 +423,51 @@
       updateStatus('Chat may not have opened, or recipient could not be verified. Message copied: paste it in the correct chat manually.');
     }
   }
-  async function compose(id, accountOnly=false) {
+  // A code may be sent on demand, even after the latest purchase was thanked.
+  // Cloud only: never fabricate client secrets or send them to the wrong account.
+  async function getClientAccess(id) {
+    try {
+      return await cloudCall('/api/client-access/for-thank', 'POST', {tornId:id});
+    } catch (error) {
+      const message=String(error?.message||error);
+      // Legacy access codes were hashed but not stored recoverably.
+      // Rotation is explicit because it invalidates any previously issued code.
+      if (/legacy access code cannot be recovered|rotate it manually/i.test(message)) {
+        if (!confirm('This customer has an older access code that cannot be recovered.\n\nGenerate a NEW code? Their previous code will STOP working.')) throw new Error('Access-code rotation cancelled.');
+        return await cloudCall('/api/client-access/issue', 'POST', {tornId:id});
+      }
+      throw error;
+    }
+  }
+  function accessText(code) {
+    return '🔐 YOUR PRIVATE CASA VITO ACCESS\n'+
+      'Visit https://vito-rewards-api.thomasmarcheix87.workers.dev/family\n'+
+      'Your personal code: '+code+'\n'+
+      'Keep this code private. It lets you see your rank, points and cash prize anytime!';
+  }
+  async function compose(id, accountOnly=false, accessOnly=false) {
     const c=db.clients[id]; if(!c) return;
+    if(accessOnly && (!cloudToken || !cloudReady)) return alert('Connect to Casa Vito Cloud in Settings before sharing an access code.');
     if(isBlacklisted(id) && !accountOnly) return alert('This customer is blacklisted. Unblock them in the Blacklist tab before sending a thank-you.');
     if(!accountOnly && !hasNewPurchase(c)) {
       alert('Already thanked for the recorded purchases. Sync sales after a new purchase to unlock Thank. Use Account Info to reply anytime.');
       return;
     }
-    let body=accountOnly ? accountInfoMessage(id) : sendTemplate(id).body;
-    if(cloudToken && !accountOnly){
-      // Each client receives a stable, server-generated private code, never included in public messages.
-      // If an older hash-only code exists, do not silently rotate or leak another player's code.
-      try{
-        const access=await cloudCall('/api/client-access/for-thank','POST',{tornId:id});
-        body+='\n\n🔐 YOUR PRIVATE CASA VITO ACCESS\n'+
-              'Visit https://vito-rewards-api.thomasmarcheix87.workers.dev/family\n'+
-              'Your personal code: '+access.code+'\n'+
-              'Keep this code private. It lets you see your rank, points and cash prize anytime!';
-      }catch(e){
-        alert('Could not retrieve the private access code for this customer: '+e.message+'\n\nOpen Casa Vito Admin > Customers and issue a new code if this is a legacy account. The thank-you was NOT marked sent.');
+    let body=accessOnly
+      ? `🇮🇹 Ciao ${c.name||'#'+id}! 🤌\n\nWelcome to Casa Vito, the VITO Family loyalty club.\n\n`
+      : (accountOnly ? accountInfoMessage(id) : sendTemplate(id).body);
+    if(cloudToken && (!accountOnly || accessOnly)) {
+      try {
+        const access=await getClientAccess(id);
+        body+=accessText(access.code)+'\n\n🤌 Don Vito — La famiglia non dimentica.';
+      } catch(e) {
+        alert('Could not prepare the private access code: '+e.message+'\nNo message was marked as sent.');
         return;
       }
     }
     const popup=document.createElement('div');popup.className='vr-overlay';
-    const modeLabel=accountOnly?'Account Info':'Thank';
-    popup.innerHTML=`<div class="vr-dialog"><h3>💬 Vito ${modeLabel} — ${escapeHtml(c.name||'#'+id)}</h3><label>Chat message (editable)</label><textarea id="vr-body" rows="14">${escapeHtml(body)}</textarea><p class="vr-muted">${accountOnly?'Account Info is always available and does not acknowledge purchases.':'After actually sending this thank-you, confirm it below. The Thank button unlocks only after a new Bazaar purchase is imported.'} Chat opens in Torn; review and press Send manually.</p><div class="vr-actions"><button id="vr-open">💬 Open chat directly</button><button id="vr-copy">📋 Copy text</button><button id="vr-sent">${accountOnly?'✓ Done':'✓ I sent it'}</button><button id="vr-close">Cancel</button></div></div>`;
+    const modeLabel=accessOnly?'Send Access':(accountOnly?'Account Info':'Thank');
+    popup.innerHTML=`<div class="vr-dialog"><h3>💬 Vito ${modeLabel} — ${escapeHtml(c.name||'#'+id)}</h3><label>Chat message (editable)</label><textarea id="vr-body" rows="14">${escapeHtml(body)}</textarea><p class="vr-muted">${accessOnly?'Send this private code only to the correct customer. This does NOT change their Thanked status.':(accountOnly?'Account Info is always available and does not acknowledge purchases.':'After actually sending this thank-you, confirm it below. The Thank button unlocks only after a new Bazaar purchase is imported.')} Chat opens in Torn; review and press Send manually.</p><div class="vr-actions"><button id="vr-open">💬 Open chat directly</button><button id="vr-copy">📋 Copy text</button><button id="vr-sent">${accountOnly?'✓ Done':'✓ I sent it'}</button><button id="vr-close">Cancel</button></div></div>`;
     document.body.appendChild(popup);
     const acknowledge=async()=>{
       if(!accountOnly) {
@@ -584,7 +604,7 @@
       <div class="vr-green">Cash prize at current rank: <b>${$(available)}</b></div>
       <div class="vr-small">${next?`Next rank: ${next.label} — ${$(next.min-c.spent)} / ${Math.ceil((next.min-c.spent)/POINT_USD).toLocaleString('en-US')} points to go`:'Top rank'} · Pending: ${$(Math.floor(c.reservedCents/100))}</div>
       <button data-compose="${c.id}" ${newSale?'':'disabled title="Already thanked; waiting for a new purchase"'}>💬 ${newSale?'Thank':'✓ Thanked'}</button>
-      <button data-account="${c.id}">📋 Account Info</button>
+      <button data-account="${c.id}">📋 Account Info</button><button data-access="${c.id}">🔑 Send Access</button>
       <button data-claim="${c.id}">💸 Request payout</button><button data-pay-client="${c.id}" ${available<1?"disabled": ""}>💵 Pay</button>
       <button data-name="${c.id}">✏️ Name</button><button data-blacklist="${c.id}">🚫 Blacklist</button></div>`;
     }).join('');
@@ -730,6 +750,7 @@
     };
     el.querySelectorAll('[data-compose]').forEach(x=>x.onclick=()=>compose(x.dataset.compose));
     el.querySelectorAll('[data-account]').forEach(x=>x.onclick=()=>compose(x.dataset.account,true));
+    el.querySelectorAll('[data-access]').forEach(x=>x.onclick=()=>compose(x.dataset.access,true,true));
     el.querySelectorAll('[data-claim]').forEach(x=>x.onclick=()=>claim(x.dataset.claim));
     el.querySelectorAll('[data-pay-client]').forEach(x=>x.onclick=()=>payClient(x.dataset.payClient));
     el.querySelectorAll('[data-pay]').forEach(x=>x.onclick=()=>payRequest(x.dataset.pay));
@@ -742,6 +763,7 @@
       el.querySelector('#vr-list').innerHTML=clientRows(clientsInTab(activeTab).filter(c=>(c.name||'').toLowerCase().includes(text)||c.id.includes(text)));
       el.querySelector('#vr-list').querySelectorAll('[data-compose]').forEach(x=>x.onclick=()=>compose(x.dataset.compose));
       el.querySelector('#vr-list').querySelectorAll('[data-account]').forEach(x=>x.onclick=()=>compose(x.dataset.account,true));
+      el.querySelector('#vr-list').querySelectorAll('[data-access]').forEach(x=>x.onclick=()=>compose(x.dataset.access,true,true));
       el.querySelector('#vr-list').querySelectorAll('[data-claim]').forEach(x=>x.onclick=()=>claim(x.dataset.claim));
       el.querySelector('#vr-list').querySelectorAll('[data-pay-client]').forEach(x=>x.onclick=()=>payClient(x.dataset.payClient));
       el.querySelector('#vr-list').querySelectorAll('[data-name]').forEach(x=>x.onclick=()=>{const c=db.clients[x.dataset.name];const name=prompt('Customer name:',c.name||'');if(name===null)return;c.name=name.trim().slice(0,80);if(cloudToken)cloudAction('POST','/api/name',{tornId:c.id,name:c.name});else{save();renderAll();}});
