@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VITO Rewards Cloud
 // @namespace    https://torn.com/vito-family-cloud/
-// @version      3.4.2
+// @version      3.4.3
 // @description  Vito family tiers, rank-valued redeemable points, bazaar sale reconciliation, purchase-triggered inbox, thanked history, chat drafts and manually confirmed payouts.
 // @author       Vito / NASHOR (based on ideas from Torn Bazaar Customer Thanker by KOKOT)
 // @match        https://www.torn.com/*
@@ -493,21 +493,39 @@
     };
     popup.querySelector('#vr-sent').onclick=async()=>{if(!(await acknowledge()))return;chatDraft=null;popup.remove();renderAll();};
   }
+  
   async function claim(id) {
-    if(!ensureCloud())return false;
-    if(isBlacklisted(id))return alert('Blacklisted customer. Review the Blacklist tab before processing a payout.');
-    const c=db.clients[id];if(!c)return;
-    const available=Math.floor(availableCents(c)/100);
-    if(!available)return alert('No cashback available.');
-    const amount=Number(prompt(`Customer: ${c.name||id}\nAvailable: ${$(available)}\nMaximum per request: ${$(MAX_CLAIM)}\n\nEnter requested amount ($):`,String(Math.min(available,MAX_CLAIM))));
-    if(!Number.isSafeInteger(amount)||amount<1||amount>Math.min(available,MAX_CLAIM))return alert('Invalid amount or exceeds balance / $2M cap.');
-    const usedMicro=payoutPointsMicro(amount*100,c.spent);
-    if(usedMicro>pointsAvailableMicro(c))return alert('Not enough points for that withdrawal.');
-    const payoutId='p'+Date.now()+'-'+Math.random().toString(36).slice(2,8);
-    if(cloudToken){return cloudAction('POST','/api/payouts',{payoutId,tornId:id,amount});}
-    db.payouts.push({id:payoutId,client:id,cents:amount*100,pointsMicro:usedMicro,rateAtClaim:tier(c.spent).rate,status:'pending',createdAt:Date.now(),paidAt:0});
-    rebuild();save();renderAll();updateStatus('Payout request reserved. No cash has been sent.');return true;
+    if (!ensureCloud()) return;
+  
+    if (isBlacklisted(id)) {
+      return alert('Blacklisted customer.');
+    }
+  
+    const c = db.clients[id];
+    if (!c) return;
+  
+    const available = Math.floor(availableCents(c) / 100);
+    const amount = Math.min(available, 2_000_000);
+  
+    if (amount < 1) {
+      return alert('No cashback available.');
+    }
+  
+    try {
+      await navigator.clipboard.writeText(String(amount));
+      updateStatus('Copied payout amount: $' + amount.toLocaleString('en-US'));
+    } catch {
+      prompt('Copy this payout amount:', String(amount));
+    }
+  
+    window.open(
+      'https://www.torn.com/profiles.php?XID=' +
+        encodeURIComponent(id),
+      '_blank',
+      'noopener'
+    );
   }
+
   function payRequest(requestId) {
     const p=db.payouts.find(x=>x.id===requestId && x.status==='pending');
     if(!p)return alert('This payout is no longer pending.');
