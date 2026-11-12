@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VITO Rewards Cloud
 // @namespace    https://torn.com/vito-family-cloud/
-// @version      3.4.3
+// @version      3.4.4
 // @description  Vito family tiers, rank-valued redeemable points, bazaar sale reconciliation, purchase-triggered inbox, thanked history, chat drafts and manually confirmed payouts.
 // @author       Vito / NASHOR (based on ideas from Torn Bazaar Customer Thanker by KOKOT)
 // @match        https://www.torn.com/*
@@ -623,7 +623,7 @@
       <div class="vr-small">${next?`Next rank: ${next.label} — ${$(next.min-c.spent)} / ${Math.ceil((next.min-c.spent)/POINT_USD).toLocaleString('en-US')} points to go`:'Top rank'} · Pending: ${$(Math.floor(c.reservedCents/100))}</div>
       <button data-compose="${c.id}" ${newSale?'':'disabled title="Already thanked; waiting for a new purchase"'}>💬 ${newSale?'Thank':'✓ Thanked'}</button>
       <button data-account="${c.id}">📋 Account Info</button><button data-access="${c.id}">🔑 Send Access</button>
-      <button data-claim="${c.id}">💸 Request payout</button><button data-pay-client="${c.id}" ${available<1?"disabled": ""}>💵 Pay</button>
+      <button data-claim="${c.id}">💸 Request payout</button>
       <button data-name="${c.id}">✏️ Name</button><button data-blacklist="${c.id}">🚫 Blacklist</button></div>`;
     }).join('');
   }
@@ -770,7 +770,6 @@
     el.querySelectorAll('[data-account]').forEach(x=>x.onclick=()=>compose(x.dataset.account,true));
     el.querySelectorAll('[data-access]').forEach(x=>x.onclick=()=>compose(x.dataset.access,true,true));
     el.querySelectorAll('[data-claim]').forEach(x=>x.onclick=()=>claim(x.dataset.claim));
-    el.querySelectorAll('[data-pay-client]').forEach(x=>x.onclick=()=>payClient(x.dataset.payClient));
     el.querySelectorAll('[data-pay]').forEach(x=>x.onclick=()=>payRequest(x.dataset.pay));
     el.querySelectorAll('[data-name]').forEach(x=>x.onclick=()=>{
       const c=db.clients[x.dataset.name];const name=prompt('Customer name:',c.name||'');if(name===null)return;c.name=name.trim().slice(0,80);if(cloudToken)cloudAction('POST','/api/name',{tornId:c.id,name:c.name});else{save();renderAll();}
@@ -783,7 +782,6 @@
       el.querySelector('#vr-list').querySelectorAll('[data-account]').forEach(x=>x.onclick=()=>compose(x.dataset.account,true));
       el.querySelector('#vr-list').querySelectorAll('[data-access]').forEach(x=>x.onclick=()=>compose(x.dataset.access,true,true));
       el.querySelector('#vr-list').querySelectorAll('[data-claim]').forEach(x=>x.onclick=()=>claim(x.dataset.claim));
-      el.querySelector('#vr-list').querySelectorAll('[data-pay-client]').forEach(x=>x.onclick=()=>payClient(x.dataset.payClient));
       el.querySelector('#vr-list').querySelectorAll('[data-name]').forEach(x=>x.onclick=()=>{const c=db.clients[x.dataset.name];const name=prompt('Customer name:',c.name||'');if(name===null)return;c.name=name.trim().slice(0,80);if(cloudToken)cloudAction('POST','/api/name',{tornId:c.id,name:c.name});else{save();renderAll();}});
       el.querySelector('#vr-list').querySelectorAll('[data-blacklist]').forEach(x=>x.onclick=()=>{const id=x.dataset.blacklist;const reason=prompt('Why blacklist '+(db.clients[id]?.name||'#'+id)+'? (Cancel to abort)','Buy-mug');if(reason!==null)addBlacklist(id,reason);});
     };
