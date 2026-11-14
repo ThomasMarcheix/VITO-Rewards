@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         VITO Rewards Cloud
 // @namespace    https://torn.com/vito-family-cloud/
-// @version      3.4.5
+// @version      3.4.7
 // @description  Vito family tiers, rank-valued redeemable points, bazaar sale reconciliation, purchase-triggered inbox, thanked history, chat drafts and manually confirmed payouts.
 // @author       Vito / NASHOR (based on ideas from Torn Bazaar Customer Thanker by KOKOT)
 // @match        https://www.torn.com/*
@@ -462,27 +462,60 @@
       throw error;
     }
   }
-  function accessText(code) {
-    return '🔐 YOUR PRIVATE CASA VITO ACCESS\n'+
-      'Visit https://vito-rewards-api.thomasmarcheix87.workers.dev/family\n'+
-      'Your personal code: '+code+'\n'+
-      'Keep this code private. It lets you see your rank, points and cash prize anytime!';
+  const FAMILY_URL = CLOUD_URL + '/family';
+  function customerCashAvailable(c) {
+    // Same rank-based redemption model as the site. Wheel prizes are bonus
+    // points: they increase the redeemable balance, never lifetime spending.
+    const bonusMicro = Math.max(0, Number(c.bonusMicro) || 0);
+    const micro = Math.max(0, pointsMicro(c.spent) + bonusMicro -
+      (Number(c.paidPointsMicro) || 0) - (Number(c.reservedPointsMicro) || 0));
+    return Math.floor(micro * RATE_PER_POINT_CENTS(c.spent) / MICRO / 100);
+  }
+  function shortFamilyMessage(c, code, accessOnly=false) {
+    const rank=tier(c.spent);
+    const cleanRank=rank.label.replace(/^\S+\s+/, '');
+    const cashbackRate=(rank.rate*100).toLocaleString('en-US',{maximumFractionDigits:2});
+    const name=String(c.name||'#'+c.id);
+    const points=Math.floor(c.spent/POINT_USD).toLocaleString('en-US');
+    const cash=$(customerCashAvailable(c));
+    const familyLink='<a href="'+FAMILY_URL+'">Open your Casa Vito account</a>';
+    return `🇮🇹 <b>BENVENUTO, ${name.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}!</b> 🤌
+
+${accessOnly?'Welcome to the family!':'Thanks for shopping at <b>VITO\'S BAZAAR!</b>'}
+
+🏅 <b>Rank:</b> ${cleanRank} (${cashbackRate}% cashback)
+🪙 <b>Points:</b> ${points}
+🛍️ <b>Spent:</b> ${$(c.spent)}
+💰 <b>Cash available:</b> ${cash}
+
+🔐 <b>YOUR FAMILY ACCESS</b>
+${familyLink}
+<b>Code:</b> ${code}
+
+🎰 Weekly wheel • Rewards • Cashback
+
+🤌 <b>Don Vito — La famiglia non dimentica.</b>`;
   }
   async function compose(id, accountOnly=false, accessOnly=false) {
     const c=db.clients[id]; if(!c) return;
-    if(accessOnly && (!cloudToken || !cloudReady)) return alert('Connect to Casa Vito Cloud in Settings before sharing an access code.');
     if(isBlacklisted(id) && !accountOnly) return alert('This customer is blacklisted. Unblock them in the Blacklist tab before sending a thank-you.');
-    if(!accountOnly && !hasNewPurchase(c)) {
+    if(!accountOnly && !accessOnly && !hasNewPurchase(c)) {
       alert('Already thanked for the recorded purchases. Sync sales after a new purchase to unlock Thank. Use Account Info to reply anytime.');
       return;
     }
-    let body=accessOnly
-      ? `🇮🇹 Ciao ${c.name||'#'+id}! 🤌\n\nWelcome to Casa Vito, the VITO Family loyalty club.\n\n`
-      : (accountOnly ? accountInfoMessage(id) : sendTemplate(id).body);
-    if(cloudToken && (!accountOnly || accessOnly)) {
+    let body;
+    if(accountOnly && !accessOnly) {
+      body=accountInfoMessage(id);
+    } else {
+      // Never create a thank-you with a missing or invented access code.
+      if(!cloudToken || !cloudReady) {
+        alert('Connect to Casa Vito Cloud in Settings before creating a message containing a private access code.');
+        return;
+      }
       try {
         const access=await getClientAccess(id);
-        body+=accessText(access.code)+'\n\n🤌 Don Vito — La famiglia non dimentica.';
+        if(!access?.code || typeof access.code !== 'string') throw Error('Cloud did not provide a valid access code');
+        body=shortFamilyMessage(c, access.code, accessOnly);
       } catch(e) {
         alert('Could not prepare the private access code: '+e.message+'\nNo message was marked as sent.');
         return;
